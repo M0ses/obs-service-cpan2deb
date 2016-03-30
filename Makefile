@@ -1,3 +1,6 @@
+SERVICE_DIR = $(DESTDIR)/usr/lib/obs/service
+
 install:
-	install -m 755 ./cpan2deb /usr/lib/obs/service/cpan2deb
-	install -m 755 ./cpan2deb.service /usr/lib/obs/service/cpan2deb.service
+	[ -d $(SERVICE_DIR) ] || mkdir -p $(SERVICE_DIR)
+	install -m 755 ./cpan2deb $(SERVICE_DIR)/cpan2deb
+	install -m 755 ./cpan2deb.service $(SERVICE_DIR)/cpan2deb.service
