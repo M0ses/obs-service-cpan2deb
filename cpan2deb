@@ -1,0 +1,264 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+
+#use Data::Dumper;
+
+use CPANPLUS::Backend;
+use File::Copy;
+use Template;
+use POSIX qw(setlocale strftime locale_h);
+
+use Getopt::Long;
+use Archive::Tar;
+use Cwd;
+use Digest;
+use File::stat;
+use File::Path qw(make_path remove_tree);
+use File::Find;
+setlocale(LC_ALL,'C');
+my $module_name = "";
+my $outdir = "";
+
+my $packager_name 	= $ENV{DEBFULLNAME};
+my $packager_email	= $ENV{DEBEMAIL};
+my $debian_package_version;
+my $debian_package_release = 1;
+
+
+GetOptions (
+	"module=s" 			=> \$module_name, 
+	"outdir=s" 			=> \$outdir,
+	"packager-name"		=> \$packager_name,
+	"packager-email"	=> \$packager_email,
+)
+      or die("Error in command line arguments\n");
+
+die "No module given\n" if ( ! $module_name );
+
+die "Invalid module name" if ( $module_name !~ /^(\w+::)*\w+$/ );
+
+die "No outdir given\n" if ( ! $outdir );
+
+my $cb = CPANPLUS::Backend->new();
+
+my $mod = $cb->module_tree($module_name);
+
+die "No such module found on CPAN\n" if ! $mod;
+
+my $rv = $cb->fetch(modules => [$module_name]);
+
+
+my $src = $rv->rv->{$module_name};
+
+my $debian_package_name = "cpan-".$module_name."-perl";
+$debian_package_name =~ s/::/-/g;
+$debian_package_name = lc($debian_package_name);
+$debian_package_version = $mod->version;
+
+my $debian_package_sources = {
+  filename => $debian_package_name . "_" . $debian_package_version . ".orig.tar.gz",
+};
+
+my $cwd = getcwd();
+chdir $outdir;
+
+copy($src,"./".$debian_package_sources->{filename}) || die "Error while copying $src to $outdir: $!";
+
+my $sha1    = Digest->new("SHA-1");
+$sha1->addfile($debian_package_sources->{filename});
+$debian_package_sources->{sha1}   = lc($sha1->hexdigest);
+
+my $sha256  = Digest->new("SHA-256");
+$sha256->addfile($debian_package_sources->{filename});
+$debian_package_sources->{sha256} = lc($sha256->hexdigest);
+
+my $md5     = Digest->new("MD5");
+open(FH,"<",$debian_package_sources->{filename}) || die "Could not open $debian_package_sources->{filename}: $!";
+$md5->addfile(*FH);
+$debian_package_sources->{md5}    = lc($md5->hexdigest);
+
+my $sb = stat($debian_package_sources->{filename});
+$debian_package_sources->{size} = $sb->size; 
+
+# date_string = Fri, 25 Mar 2016 13:51:54 +0100
+# module_name
+# packager_name
+# packager_email
+# debian_package_name
+# debian_package_version
+# debian_package_release = 1
+
+my $code2eval;
+while ( <DATA> ) { $code2eval .= $_ };
+my $templates;
+eval "$code2eval";
+
+( -d "debian" ) || mkdir "debian";
+
+# create Template object
+my $template = Template->new({});
+my $vars = {
+	module_name 			=> $module_name,
+	packager_name 			=> $packager_name,
+	packager_email 			=> $packager_email,
+	debian_package_name 	=> $debian_package_name,
+	debian_package_version	=> $debian_package_version,
+	debian_package_release	=> $debian_package_release,
+    debian_package_sources  => $debian_package_sources,
+	date_string				=> strftime("%a, %d %b %Y %H:%M:%S %z", localtime(time()))
+};
+
+# process input template, substituting variables
+foreach my $tmpl ( "changelog", "rules", "control") {
+	$template->process(\$templates->{$tmpl}, $vars, "debian/$tmpl")
+				|| die $template->error();
+}
+
+$template->process(\$templates->{'dsc'}, $vars,"$debian_package_name.dsc" )
+				|| die $template->error();
+
+my $tar       = Archive::Tar->new;
+my @filelist;
+find(sub { push(@filelist,$File::Find::name) }, "debian");
+$tar->add_files(@filelist);
+$tar->write("debian.tar.gz",COMPRESS_GZIP);
+
+File::Path::rmtree("debian");
+
+chdir($cwd);
+
+exit 0;
+
+__DATA__
+
+$templates->{changelog} = <<EOF
+[% debian_package_name %] ([% debian_package_version %]-[% debian_package_release %]) unstable; urgency=medium
+
+  * Initial release.
+
+ -- [% packager_name %] <[% packager_email%]>  [% date_string %]
+EOF
+;
+
+$templates->{control} = <<EOF
+Source: [% debian_package_name %]
+Section: perl
+Priority: optional
+Maintainer: [% packager_name %] <[% packager_email%]>
+Build-Depends: debhelper (>= 4.0.2), [% debian_package_depends %]
+
+Package: [% debian_package_name %]
+Architecture: any
+#Depends: \${shlibs:Depends}
+Description: [% module_name %]
+ [% module_name %]
+EOF
+;
+
+$templates->{dsc} = <<EOF
+Format: 1.0
+Source: [% debian_package_name %]
+Binary: [% debian_package_name %]
+Architecture: all
+Version: [% debian_package_version %]-[% debian_package_release %]
+Maintainer: [% packager_email%]
+Standards-Version: 3.6.1
+Build-Depends: debhelper (>= 4.0.2)[% build_depends %]
+Depends: [% depends %]
+Package-List:
+ [% debian_package_name %] deb perl optional arch=all
+Checksums-Sha1:
+ [% debian_package_sources.sha1 %] [% debian_package_sources.size %] [% debian_package_sources.filename %]
+Checksums-Sha256:
+ [% debian_package_sources.sha256 %] [% debian_package_sources.size %] [% debian_package_sources.filename %]
+Files:
+ [% debian_package_sources.md5 %] [% debian_package_sources.size %] [% debian_package_sources.filename %]
+
+EOF
+;
+$templates->{rules} = <<EOF
+#!/usr/bin/make -f
+# Sample debian/rules that uses debhelper.
+# GNU copyright 1997 to 1999 by Joey Hess.
+
+# Uncomment this to turn on verbose mode.
+#export DH_VERBOSE=1
+
+# This is the debhelper compatibility version to use.
+export DH_COMPAT=4
+
+build: build-stamp
+build-stamp:
+	dh_testdir
+
+	# Add here commands to compile the package.
+	#./configure
+	perl Makefile.PL
+	make
+	# --- end custom part for compiling
+
+	touch build-stamp
+
+clean:
+	dh_testdir
+	dh_testroot
+	rm -f build-stamp
+
+	# Add here commands to clean up after the build process.
+	make clean || true
+	# --- end custom part for cleaning up
+
+	dh_clean
+
+install: build
+	dh_testdir
+	dh_testroot
+	dh_clean -k
+	dh_installdirs
+
+	# Add here commands to install the package
+	# The DESTDIR Has To Be Exactly  /usr/src/packages/BUILD/debian/<nameOfPackage>
+	make install DESTDIR=/usr/src/packages/BUILD/debian/[% debian_package_name %]
+	# --- end custom part for installing
+
+# Build architecture-independent files here.
+binary-indep: build install
+	# We have nothing to do by default.
+
+# Build architecture-dependent files here.
+binary-arch: build install
+	dh_testdir
+	dh_testroot
+#	dh_installdebconf
+	dh_installdocs
+	dh_installexamples
+	dh_installmenu
+#	dh_installlogrotate
+#	dh_installemacsen
+#	dh_installpam
+#	dh_installmime
+#	dh_installinit
+	dh_installcron
+	dh_installman
+	dh_installinfo
+#	dh_undocumented
+	dh_installchangelogs
+	dh_link
+	dh_strip
+	dh_compress
+	dh_fixperms
+#	dh_makeshlibs
+	dh_installdeb
+	dh_perl
+	dh_shlibdeps
+	dh_gencontrol
+	dh_md5sums
+	dh_builddeb
+
+binary: binary-indep binary-arch
+.PHONY: build clean binary-indep binary-arch binary install
+EOF
+;
+

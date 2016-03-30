@@ -1,0 +1,8 @@
+<service name="cpan2deb">
+  <summary>Create OBS compatible debian packages for CPAN modules</summary>
+  <description>This service can be used to create OBS compatible debian packages for CPAN modules</description>
+  <parameter name="module">
+    <description>CPAN module to create a package for</description>
+    <required/>
+  </parameter>
+</service>
